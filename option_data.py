@@ -18,7 +18,9 @@ import time
 import pandas as pd
 from datetime import datetime, date
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from utils import safe_ltp, retry_sleep # Import the utility functions from the utils file
+from utils import safe_ltp, retry_sleep # Import the utility function from the utils file
+from options_config import SPOT_PRICE_INCREASE_PERCENTAGE, THREAD_WORKERS
+from tqdm import tqdm # New import for the progress bar
 
 def get_option_data_for_single_stock(smartApi, symbol_name, instrument_list, nearest_expiry_str):
     """
@@ -31,27 +33,27 @@ def get_option_data_for_single_stock(smartApi, symbol_name, instrument_list, nea
         nearest_expiry_str (str): The expiry date string (e.g., "30SEP2025").
 
     Returns:
-        list of dicts or None: A list of dictionaries with option data, or None if data is not found.
+        tuple (list or None, float): A tuple containing a list of dictionaries with option data and the spot price, or (None, 0.0) if data is not found.
     """
     try:
         # Find spot price from the equity segment
         spot_rec = next((inst for inst in instrument_list if inst.get("symbol") == f"{symbol_name}-EQ" and inst.get("exch_seg") == "NSE"), None)
         if not spot_rec:
-            return None
+            return None, 0.0
         spot_price = safe_ltp(smartApi, "NSE", spot_rec["symbol"], spot_rec["token"])
         if not spot_price:
-            return None
+            return None, 0.0
 
-        # Calculate a hypothetical future price
-        new_spot_price = round(spot_price * 1.02, 2)
+        # Calculate a hypothetical future price using the config variable
+        new_spot_price = round(spot_price * (1 + SPOT_PRICE_INCREASE_PERCENTAGE), 2)
         nearest_expiry = datetime.strptime(nearest_expiry_str, "%d%b%Y").date()
         if (nearest_expiry - date.today()).days < 0:
-            return None
+            return None, 0.0
 
         # Find lot size from a relevant F&O instrument record
         opt_rows = [i for i in instrument_list if i.get("name") == symbol_name and i.get("expiry") == nearest_expiry_str and i.get("instrumenttype") == "OPTSTK"]
         if not opt_rows:
-            return None
+            return None, spot_price
         
         # Take the lot size from the first valid option record found
         lot_size = int(opt_rows[0].get("lotsize", 1))
@@ -66,7 +68,7 @@ def get_option_data_for_single_stock(smartApi, symbol_name, instrument_list, nea
             selected_strikes.append(otm_new)
 
         if not selected_strikes:
-            return None
+            return None, spot_price
 
         data_for_strikes = []
         for strike_input in selected_strikes:
@@ -82,10 +84,10 @@ def get_option_data_for_single_stock(smartApi, symbol_name, instrument_list, nea
                             "LTP": float(f"{ltp:.2f}"),
                             "Lot Size": lot_size
                         })
-        return data_for_strikes or None
+        return data_for_strikes or None, spot_price
     except Exception as e:
         print(f"Error fetching data for {symbol_name}: {e}")
-        return None
+        return None, 0.0
 
 def build_otm_dataframe(smartApi, stock_df, instrument_list, nearest_expiry_str):
     """
@@ -102,14 +104,19 @@ def build_otm_dataframe(smartApi, stock_df, instrument_list, nearest_expiry_str)
     """
     symbols = stock_df["Symbol"].tolist()
     final_data = []
-    with ThreadPoolExecutor(max_workers=4) as executor:
+    # Use the THREAD_WORKERS variable from the config file
+    with ThreadPoolExecutor(max_workers=THREAD_WORKERS) as executor:
         future_to_symbol = {
             executor.submit(get_option_data_for_single_stock, smartApi, symbol, instrument_list, nearest_expiry_str): symbol
             for symbol in symbols
         }
-        for future in as_completed(future_to_symbol):
-            option_data = future.result()
+        # Wrap the iterator with tqdm to show a progress bar
+        for future in tqdm(as_completed(future_to_symbol), total=len(symbols), desc="Fetching OTM Data"):
+            option_data, spot_price = future.result()
             if option_data:
+                # Add spot_price to each dictionary in the list
+                for item in option_data:
+                    item['Spot Price'] = spot_price
                 final_data.extend(option_data)
             retry_sleep(0.02) # Add a small delay between processing each stock
 
@@ -118,15 +125,15 @@ def build_otm_dataframe(smartApi, stock_df, instrument_list, nearest_expiry_str)
 
     df = pd.DataFrame(final_data)
     df = pd.merge(df, stock_df, on="Symbol", how="left")
-    df = df[["Symbol", "Stock Name", "% Change", "Strike Price", "Option Type", "LTP", "Lot Size"]]
+    df = df[["Symbol", "Stock Name", "% Change", "Strike Price", "Option Type", "LTP", "Lot Size", "Spot Price"]]
 
-    pivot_df = df.pivot_table(index=["Symbol", "Stock Name", "% Change", "Strike Price", "Lot Size"],
+    pivot_df = df.pivot_table(index=["Symbol", "Stock Name", "% Change", "Strike Price", "Lot Size", "Spot Price"],
                               columns="Option Type", values="LTP", aggfunc="first").reset_index()
     if "CE" not in pivot_df.columns: pivot_df["CE"] = None
     if "PE" not in pivot_df.columns: pivot_df["PE"] = None
 
     merged_rows = []
-    for (sym, name, pct), group in pivot_df.groupby(["Symbol", "Stock Name", "% Change"]):
+    for (sym, name, pct, sp), group in pivot_df.groupby(["Symbol", "Stock Name", "% Change", "Spot Price"]):
         group = group.sort_values("Strike Price").reset_index(drop=True)
         if len(group) >= 2:
             row = {
@@ -140,6 +147,7 @@ def build_otm_dataframe(smartApi, stock_df, instrument_list, nearest_expiry_str)
                 "New OTM Strike": float(f"{group.loc[1, 'Strike Price']:.2f}"),
                 "New OTM CE": float(f"{(group.loc[1, 'CE'] or 0):.2f}"),
                 "New OTM PE": float(f"{(group.loc[1, 'PE'] or 0):.2f}"),
+                "Gap": float(f"{group.loc[0, 'Strike Price'] - sp:.2f}")
             }
             row["CE P/L"] = float(f"{row['Lot Size'] * (row['Nearest OTM CE'] - row['New OTM CE']):.2f}")
             merged_rows.append(row)

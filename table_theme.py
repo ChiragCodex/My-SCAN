@@ -20,12 +20,12 @@ def get_table_headers():
         ("Symbol", "bold cyan"),
         ("Stock Name", "bold yellow"),
         ("% Change", "green"),
-        ("Lot Size", "magenta"),
+        ("Lot Size", "White"),
         ("Nearest OTM Strike", "magenta"),
         ("Nearest OTM CE", "bright_blue"),
         ("Nearest OTM PE", "bright_red"),
         ("New OTM Strike", "magenta"),
         ("New OTM CE", "bright_blue"),
         ("New OTM PE", "bright_red"),
-        ("CE P/L", "yellow")
+        ("CE P/L", "bold yellow")
     ]
