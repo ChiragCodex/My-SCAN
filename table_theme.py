@@ -3,10 +3,6 @@ table_theme.py
 ------------------
 Purpose:
     Defines a reusable theme for styling tables using the `rich` library.
-
-Functions:
-    get_table_headers():
-        -> Returns a list of tuples for table headers and their styles.
 """
 
 def get_table_headers():
@@ -19,6 +15,7 @@ def get_table_headers():
     return [
         ("Symbol", "bold cyan"),
         ("Stock Name", "bold yellow"),
+        ("Sector", "bold magenta"),  # Added Sector column
         ("% Change", "green"),
         ("Lot Size", "White"),
         ("Nearest OTM Strike", "magenta"),
